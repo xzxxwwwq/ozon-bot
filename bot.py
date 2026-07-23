@@ -64,14 +64,49 @@ def check_shifts():
         print(f"Ошибка проверки смен: {e}")
         return []
 
+def get_income():
+    """Получает данные о доходах через API Ozon Job"""
+    try:
+        session = requests.Session()
+        
+        # Пробуем разные возможные адреса API
+        urls = [
+            "https://job.ozon.ru/api/payments/statistics",
+            "https://job.ozon.ru/api/profile/income",
+            "https://job.ozon.ru/api/payments"
+        ]
+        
+        for url in urls:
+            try:
+                response = session.get(url, timeout=10)
+                if response.status_code == 200:
+                    data = response.json()
+                    # Проверяем наличие данных
+                    if data:
+                        return {
+                            'total': data.get('total', 0),
+                            'month': data.get('month', 0),
+                            'week': data.get('week', 0),
+                            'today': data.get('today', 0)
+                        }
+            except:
+                continue
+        
+        return None
+    except Exception as e:
+        print(f"Ошибка получения дохода: {e}")
+        return None
+
 def get_main_keyboard():
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
     btn1 = KeyboardButton("👤 Профиль")
     btn2 = KeyboardButton("📊 Статус")
-    btn3 = KeyboardButton("⚙️ Настройки")
-    btn4 = KeyboardButton("🔄 Обновить")
+    btn3 = KeyboardButton("💰 Доход")
+    btn4 = KeyboardButton("⚙️ Настройки")
+    btn5 = KeyboardButton("🔄 Обновить")
     markup.row(btn1, btn2)
     markup.row(btn3, btn4)
+    markup.row(btn5)
     return markup
 
 def get_profile_text(message):
@@ -132,7 +167,7 @@ async def profile(message):
     await bot.send_message(
         message.chat.id,
         text,
-        parse_mode="Markdown",
+        parse_mode=None,
         reply_markup=get_main_keyboard()
     )
 
@@ -155,6 +190,41 @@ async def status_command(message):
         await bot.send_message(
             message.chat.id,
             "📭 Смен сейчас нет",
+            reply_markup=get_main_keyboard()
+        )
+
+@bot.message_handler(func=lambda message: message.text == "💰 Доход")
+async def income(message):
+    await bot.send_message(
+        message.chat.id,
+        "💰 Ищу данные о доходах...",
+        reply_markup=get_main_keyboard()
+    )
+    data = await asyncio.to_thread(get_income)
+    
+    if data:
+        text = (
+            f"💰 *Доход*\n\n"
+            f"• За сегодня: {data.get('today', 0):,} ₽\n"
+            f"• За неделю: {data.get('week', 0):,} ₽\n"
+            f"• За месяц: {data.get('month', 0):,} ₽\n"
+            f"• Всего: {data.get('total', 0):,} ₽"
+        )
+        await bot.send_message(
+            message.chat.id,
+            text,
+            parse_mode="Markdown",
+            reply_markup=get_main_keyboard()
+        )
+    else:
+        await bot.send_message(
+            message.chat.id,
+            "❌ Не удалось получить данные о доходах.\n"
+            "Возможно, Ozon изменил API или требуется переавторизация.\n\n"
+            "Попробуй:\n"
+            "1. Зайди в приложение Ozon Job\n"
+            "2. Нажми на иконку кошелька (Выплаты)\n"
+            "3. Вернись в бот и нажми '💰 Доход' снова",
             reply_markup=get_main_keyboard()
         )
 
