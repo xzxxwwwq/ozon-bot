@@ -41,9 +41,6 @@ CHECK_INTERVAL = 60
 LAST_SHIFTS = {}
 CHAT_ID = None
 STATS = {"total_shifts": 0, "last_check": None}
-auth_step = None
-user_phone = None
-auth_session = None
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -132,12 +129,25 @@ def check_monitored_shifts():
             monitored[process] = all_shifts[process]
     return monitored
 
+# ===== ИСПРАВЛЕННАЯ ФУНКЦИЯ РЕЙТИНГА =====
 def get_rating():
     try:
-        session = get_session()
-        response = session.get("https://job.ozon.ru/profile/rating", headers=HEADERS)
-        if response.status_code != 200:
+        # Принудительно берём токен
+        token = OZON_TOKEN or load_cookies().get('__Secure-refresh-token')
+        if not token:
+            print("❌ Токен не найден")
             return None
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Cookie": f"__Secure-refresh-token={token}"
+        }
+        
+        response = requests.get("https://job.ozon.ru/profile/rating", headers=headers)
+        if response.status_code != 200:
+            print(f"Ошибка рейтинга: статус {response.status_code}")
+            return None
+        
         soup = BeautifulSoup(response.text, 'html.parser')
         level = soup.find('h1')
         level_text = level.text.strip() if level else "Не найден"
@@ -238,7 +248,6 @@ async def start(message):
     )
     asyncio.create_task(monitor_shifts())
 
-# ===== НОВАЯ КОМАНДА /setcookies =====
 @bot.message_handler(commands=['setcookies'])
 async def set_cookies(message):
     await bot.send_message(
@@ -246,7 +255,6 @@ async def set_cookies(message):
         "🍪 *Отправь свой токен __Secure-refresh-token*\n\nПросто скопируй и отправь его сюда."
     )
 
-# ===== ОБРАБОТЧИК ТОКЕНА (ВСТРОЕН В ПОСЛЕДНИЙ КОД) =====
 @bot.message_handler(func=lambda message: message.text and len(message.text) > 50 and '.' in message.text)
 async def handle_cookies(message):
     global OZON_TOKEN
@@ -262,7 +270,6 @@ async def handle_cookies(message):
         reply_markup=get_main_keyboard()
     )
 
-# ===== ОСТАЛЬНЫЕ КОМАНДЫ =====
 @bot.message_handler(func=lambda message: message.text == "👤 Профиль")
 async def profile(message):
     await bot.send_message(message.chat.id, get_profile_text(message), parse_mode="Markdown", reply_markup=get_main_keyboard())
@@ -313,7 +320,11 @@ async def rating_command(message):
             reply_markup=get_main_keyboard()
         )
     else:
-        await bot.send_message(message.chat.id, "❌ Не удалось получить рейтинг.", reply_markup=get_main_keyboard())
+        await bot.send_message(
+            message.chat.id,
+            "❌ Не удалось получить рейтинг.\n\nВозможно, токен устарел или неверен.\nПопробуй обновить токен через /setcookies",
+            reply_markup=get_main_keyboard()
+        )
 
 @bot.message_handler(func=lambda message: message.text == "⚙️ Настройки")
 async def settings(message):
