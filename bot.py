@@ -1,6 +1,5 @@
 import asyncio
 import os
-import re
 import requests
 from bs4 import BeautifulSoup
 import telebot
@@ -15,20 +14,46 @@ OZON_TOKEN = os.getenv("OZON_TOKEN")
 
 bot = AsyncTeleBot(TOKEN)
 
-WAREHOUSE = "Софьино"
-PROCESS = "Производство непрофиль"
-CHECK_INTERVAL = 60
-LAST_SHIFTS = set()
-CHAT_ID = None
-AUTH_CODE = None
-
-STATS = {
-    "total_shifts": 0,
-    "last_check": None,
+USER_SETTINGS = {
+    "warehouse": "Софьино",
+    "processes": ["Производство непрофиль"],
     "monitoring_active": True
 }
 
-# ===== ФУНКЦИЯ ДЛЯ КУК =====
+ALL_PROCESSES = [
+    "Сортировка крупного товара",
+    "Сортировка мелкого товара",
+    "Размещение",
+    "Подбор",
+    "Приемка",
+    "Упаковка",
+    "Возвраты",
+    "Консолидация",
+    "Обработка проблемного товара",
+    "Производство непрофиль",
+    "Сортировка непрофиль",
+    "Погрузка и разгрузка",
+    "Подбор возвратов",
+    "Инвентаризация"
+]
+
+CHECK_INTERVAL = 60
+LAST_SHIFTS = {}
+CHAT_ID = None
+STATS = {"total_shifts": 0, "last_check": None}
+auth_step = None
+user_phone = None
+auth_session = None
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Origin": "https://job.ozon.ru",
+    "Referer": "https://job.ozon.ru/"
+}
+
+# ===== ФУНКЦИИ ДЛЯ КУК =====
 def save_cookies(cookies):
     try:
         with open('cookies.json', 'w') as f:
@@ -54,111 +79,166 @@ def get_session():
         session.cookies.set('__Secure-refresh-token', OZON_TOKEN)
     return session
 
-# ===== ПРОВЕРКА СМЕН =====
-def check_shifts():
+# ===== ОСНОВНЫЕ ФУНКЦИИ =====
+def get_all_shifts():
     try:
         session = get_session()
-        response = session.get("https://job.ozon.ru")
+        response = session.get("https://job.ozon.ru", headers=HEADERS)
+        if response.status_code != 200:
+            return {}
         soup = BeautifulSoup(response.text, 'html.parser')
-        
+        warehouse = USER_SETTINGS["warehouse"]
+        result = {}
         warehouses = soup.find_all('div', class_='warehouse-item')
         for wh in warehouses:
-            name = wh.find('div', class_='warehouse-name')
-            if name and WAREHOUSE in name.text:
+            name_elem = wh.find('div', class_='warehouse-name')
+            if name_elem and warehouse in name_elem.text:
                 warehouse_id = wh.get('data-id')
                 if warehouse_id:
                     process_url = f"https://job.ozon.ru/api/warehouse/{warehouse_id}/processes"
-                    proc_response = session.get(process_url)
-                    proc_data = proc_response.json()
-                    
-                    for proc in proc_data:
-                        if PROCESS in proc.get('name', ''):
+                    proc_response = session.get(process_url, headers=HEADERS)
+                    if proc_response.status_code == 200:
+                        proc_data = proc_response.json()
+                        for proc in proc_data:
+                            proc_name = proc.get('name', '')
                             process_id = proc.get('id')
                             if process_id:
                                 shifts_url = f"https://job.ozon.ru/api/process/{process_id}/shifts"
-                                shifts_response = session.get(shifts_url)
-                                shifts_data = shifts_response.json()
-                                
-                                available = []
-                                for shift in shifts_data:
-                                    if shift.get('available'):
-                                        date = shift.get('date')
-                                        if date:
-                                            available.append(date)
-                                
-                                return available
-        return []
+                                shifts_response = session.get(shifts_url, headers=HEADERS)
+                                if shifts_response.status_code == 200:
+                                    shifts_data = shifts_response.json()
+                                    available = []
+                                    for shift in shifts_data:
+                                        if shift.get('available'):
+                                            available.append({
+                                                'date': shift.get('date', ''),
+                                                'time_start': shift.get('time_start', ''),
+                                                'time_end': shift.get('time_end', ''),
+                                                'rate': shift.get('rate', '')
+                                            })
+                                    if available:
+                                        result[proc_name] = available
+                    break
+        return result
     except Exception as e:
-        print(f"Ошибка проверки смен: {e}")
-        return []
+        print(f"Ошибка получения смен: {e}")
+        return {}
 
-# ===== КЛАВИАТУРА =====
+def check_monitored_shifts():
+    all_shifts = get_all_shifts()
+    monitored = {}
+    for process in USER_SETTINGS['processes']:
+        if process in all_shifts:
+            monitored[process] = all_shifts[process]
+    return monitored
+
+def get_rating():
+    try:
+        session = get_session()
+        response = session.get("https://job.ozon.ru/profile/rating", headers=HEADERS)
+        if response.status_code != 200:
+            return None
+        soup = BeautifulSoup(response.text, 'html.parser')
+        level = soup.find('h1')
+        level_text = level.text.strip() if level else "Не найден"
+        points = soup.find('div', class_='rating-points')
+        points_text = points.text.strip() if points else "Не найдены"
+        return {'level': level_text, 'points': points_text}
+    except Exception as e:
+        print(f"Ошибка рейтинга: {e}")
+        return None
+
 def get_main_keyboard():
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
     btn1 = KeyboardButton("👤 Профиль")
     btn2 = KeyboardButton("📊 Статус")
-    btn3 = KeyboardButton("⚙️ Настройки")
-    btn4 = KeyboardButton("🔄 Обновить")
+    btn3 = KeyboardButton("📋 Все смены")
+    btn4 = KeyboardButton("⭐ Рейтинг")
+    btn5 = KeyboardButton("⚙️ Настройки")
+    btn6 = KeyboardButton("🔄 Обновить")
     markup.row(btn1, btn2)
     markup.row(btn3, btn4)
+    markup.row(btn5, btn6)
     return markup
 
 def get_profile_text(message):
     user = message.from_user
     now = datetime.now().strftime("%H:%M:%S")
+    processes = "\n  ".join(USER_SETTINGS['processes']) if USER_SETTINGS['processes'] else "Нет"
     token_status = "✅ Есть" if OZON_TOKEN or load_cookies() else "❌ Нет"
-    text = (
-        f"👤 Профиль\n\n"
+    return (
+        f"👤 *Профиль*\n\n"
         f"• Имя: {user.first_name}\n"
         f"• ID: {user.id}\n"
-        f"• Склад: {WAREHOUSE}\n"
-        f"• Процесс: {PROCESS}\n"
-        f"• Мониторинг: {'✅ Активен' if STATS['monitoring_active'] else '❌ Отключен'}\n"
+        f"• Склад: {USER_SETTINGS['warehouse']}\n"
+        f"• Процессы: {len(USER_SETTINGS['processes'])}\n"
+        f"  {processes}\n"
+        f"• Мониторинг: {'✅ Активен' if USER_SETTINGS['monitoring_active'] else '❌ Отключен'}\n"
         f"• Найдено смен: {STATS['total_shifts']}\n"
         f"• Авторизация: {token_status}\n"
         f"• Время: {now}"
     )
-    return text
 
-# ===== МОНИТОРИНГ =====
 async def monitor_shifts():
-    global LAST_SHIFTS, CHAT_ID
+    global LAST_SHIFTS, CHAT_ID, STATS
     while True:
         try:
-            current_shifts = set(await asyncio.to_thread(check_shifts))
-            if current_shifts:
-                STATS['total_shifts'] += len(current_shifts)
-                new_shifts = current_shifts - LAST_SHIFTS
-                if new_shifts and CHAT_ID and STATS['monitoring_active']:
-                    await bot.send_message(
-                        CHAT_ID,
-                        f"🔔 *НОВЫЕ СМЕНЫ!*\n\n📍 {WAREHOUSE}\n⚙️ {PROCESS}\n📅 " + "\n".join([f"• {d}" for d in new_shifts]),
-                        parse_mode="Markdown"
-                    )
-                LAST_SHIFTS = current_shifts
+            all_shifts = await asyncio.to_thread(check_monitored_shifts)
+            if all_shifts:
+                for process, shifts in all_shifts.items():
+                    current_dates = {s['date'] for s in shifts}
+                    old_dates = LAST_SHIFTS.get(process, set())
+                    new_dates = current_dates - old_dates
+                    if new_dates and CHAT_ID and USER_SETTINGS['monitoring_active']:
+                        STATS['total_shifts'] += len(new_dates)
+                        shift_text = ""
+                        for shift in shifts:
+                            if shift['date'] in new_dates:
+                                time_str = f"{shift['time_start']} - {shift['time_end']}" if shift['time_start'] else "Время уточняется"
+                                shift_text += f"  • 📅 {shift['date']} | ⏰ {time_str}\n"
+                        if shift_text:
+                            await bot.send_message(
+                                CHAT_ID,
+                                f"🔔 *НОВАЯ СМЕНА!*\n\n📍 {USER_SETTINGS['warehouse']}\n⚙️ {process}\n{shift_text}\n🏃‍♂️ Бери скорее!",
+                                parse_mode="Markdown"
+                            )
+                    LAST_SHIFTS[process] = current_dates
             STATS['last_check'] = datetime.now().strftime("%H:%M:%S")
         except Exception as e:
             print(f"Ошибка мониторинга: {e}")
         await asyncio.sleep(CHECK_INTERVAL)
 
-# ===== КОМАНДЫ =====
 @bot.message_handler(commands=['start'])
 async def start(message):
     global CHAT_ID
     CHAT_ID = message.chat.id
+    user_name = message.from_user.first_name
+    processes = ", ".join(USER_SETTINGS['processes'])
+    has_auth = bool(OZON_TOKEN or load_cookies())
+    auth_status = "✅ Авторизован" if has_auth else "❌ Не авторизован"
+    welcome_text = (
+        f"👋 *Добро пожаловать, {user_name}!*\n\n"
+        f"📍 *Склад:* {USER_SETTINGS['warehouse']}\n"
+        f"⚙️ *Отслеживаю:* {processes}\n"
+        f"🔐 *Статус:* {auth_status}\n\n"
+        f"📌 *Что я умею:*\n"
+        f"👤 Профиль — Твои данные\n"
+        f"📊 Статус — Смены по выбранным процессам\n"
+        f"📋 Все смены — Все смены на складе\n"
+        f"⭐ Рейтинг — Твой рейтинг\n"
+        f"⚙️ Настройки — Добавить/удалить процесс\n"
+        f"🔄 Обновить — Обновить данные\n\n"
+        f"🔑 Отправь токен командой /setcookies"
+    )
     await bot.send_message(
         message.chat.id,
-        f"👋 Привет, {message.from_user.first_name}!\n\n"
-        f"📍 Слежу за сменами:\n"
-        f"• Склад: {WAREHOUSE}\n"
-        f"• Процесс: {PROCESS}\n\n"
-        f"📌 Используй кнопки ниже\n"
-        f"🔑 Отправь токен командой /setcookies",
+        welcome_text,
+        parse_mode="Markdown",
         reply_markup=get_main_keyboard()
     )
     asyncio.create_task(monitor_shifts())
 
-# ===== КОМАНДА /setcookies =====
+# ===== НОВАЯ КОМАНДА /setcookies =====
 @bot.message_handler(commands=['setcookies'])
 async def set_cookies(message):
     await bot.send_message(
@@ -166,7 +246,7 @@ async def set_cookies(message):
         "🍪 *Отправь свой токен __Secure-refresh-token*\n\nПросто скопируй и отправь его сюда."
     )
 
-# ===== ОБРАБОТКА ТОКЕНА =====
+# ===== ОБРАБОТЧИК ТОКЕНА (ВСТРОЕН В ПОСЛЕДНИЙ КОД) =====
 @bot.message_handler(func=lambda message: message.text and len(message.text) > 50 and '.' in message.text)
 async def handle_cookies(message):
     global OZON_TOKEN
@@ -177,104 +257,122 @@ async def handle_cookies(message):
         json.dump({"__Secure-refresh-token": token}, f)
     await bot.send_message(
         message.chat.id,
-        "✅ *Куки сохранены!*\n\nТеперь я могу видеть смены! 🎉",
+        "✅ *Куки сохранены!*\n\nТеперь я могу видеть смены и рейтинг! 🎉",
         parse_mode="Markdown",
         reply_markup=get_main_keyboard()
     )
 
-# ===== КНОПКИ =====
+# ===== ОСТАЛЬНЫЕ КОМАНДЫ =====
 @bot.message_handler(func=lambda message: message.text == "👤 Профиль")
 async def profile(message):
-    text = get_profile_text(message)
-    await bot.send_message(
-        message.chat.id,
-        text,
-        parse_mode=None,
-        reply_markup=get_main_keyboard()
-    )
+    await bot.send_message(message.chat.id, get_profile_text(message), parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 @bot.message_handler(func=lambda message: message.text == "📊 Статус")
 async def status_command(message):
-    await bot.send_message(
-        message.chat.id,
-        "🔍 Проверяю наличие смен...",
-        reply_markup=get_main_keyboard()
-    )
-    shifts = await asyncio.to_thread(check_shifts)
-    if shifts:
+    await bot.send_message(message.chat.id, "🔍 Проверяю смены...", reply_markup=get_main_keyboard())
+    all_shifts = await asyncio.to_thread(check_monitored_shifts)
+    if all_shifts:
+        text = "✅ *Отслеживаемые смены:*\n\n"
+        for process, shifts in all_shifts.items():
+            text += f"⚙️ *{process}*\n"
+            for shift in shifts:
+                time_str = f"{shift['time_start']} - {shift['time_end']}" if shift['time_start'] else "Время уточняется"
+                text += f"  • 📅 {shift['date']} | ⏰ {time_str}\n"
+            text += "\n"
+        await bot.send_message(message.chat.id, text, parse_mode="Markdown", reply_markup=get_main_keyboard())
+    else:
+        await bot.send_message(message.chat.id, "📭 Нет смен", reply_markup=get_main_keyboard())
+
+@bot.message_handler(func=lambda message: message.text == "📋 Все смены")
+async def all_shifts_command(message):
+    await bot.send_message(message.chat.id, "🔍 Загружаю все смены...", reply_markup=get_main_keyboard())
+    all_shifts = await asyncio.to_thread(get_all_shifts)
+    if all_shifts:
+        text = f"📋 *Все смены*\n📍 {USER_SETTINGS['warehouse']}\n\n"
+        for process, shifts in all_shifts.items():
+            is_monitored = process in USER_SETTINGS['processes']
+            mark = "✅ " if is_monitored else "   "
+            text += f"{mark}⚙️ *{process}*\n"
+            for shift in shifts:
+                time_str = f"{shift['time_start']} - {shift['time_end']}" if shift['time_start'] else "Время уточняется"
+                text += f"  • 📅 {shift['date']} | ⏰ {time_str}\n"
+            text += "\n"
+        await bot.send_message(message.chat.id, text, parse_mode="Markdown", reply_markup=get_main_keyboard())
+    else:
+        await bot.send_message(message.chat.id, "📭 Нет смен", reply_markup=get_main_keyboard())
+
+@bot.message_handler(func=lambda message: message.text == "⭐ Рейтинг")
+async def rating_command(message):
+    await bot.send_message(message.chat.id, "🔍 Загружаю рейтинг...", reply_markup=get_main_keyboard())
+    rating = await asyncio.to_thread(get_rating)
+    if rating:
         await bot.send_message(
             message.chat.id,
-            f"✅ *Доступные смены:*\n" + "\n".join([f"• {d}" for d in shifts]),
+            f"⭐ *Рейтинг*\n\n• Уровень: {rating['level']}\n• Баллы: {rating['points']}",
             parse_mode="Markdown",
             reply_markup=get_main_keyboard()
         )
     else:
-        await bot.send_message(
-            message.chat.id,
-            "📭 Смен сейчас нет",
-            reply_markup=get_main_keyboard()
-        )
+        await bot.send_message(message.chat.id, "❌ Не удалось получить рейтинг.", reply_markup=get_main_keyboard())
 
 @bot.message_handler(func=lambda message: message.text == "⚙️ Настройки")
 async def settings(message):
     markup = InlineKeyboardMarkup()
-    btn1 = InlineKeyboardButton("🔔 Вкл/Выкл уведомления", callback_data="toggle_monitoring")
-    btn2 = InlineKeyboardButton("📋 Сменить склад", callback_data="change_warehouse")
-    markup.row(btn1)
-    markup.row(btn2)
+    markup.add(InlineKeyboardButton("➕ Добавить процесс", callback_data="add_process"))
+    markup.add(InlineKeyboardButton("➖ Удалить процесс", callback_data="remove_process"))
+    markup.add(InlineKeyboardButton("🔔 Вкл/Выкл уведомления", callback_data="toggle_monitoring"))
+    processes = "\n  ".join(USER_SETTINGS['processes']) if USER_SETTINGS['processes'] else "❌ Нет"
     await bot.send_message(
         message.chat.id,
-        "⚙️ *Настройки*\n\nВыбери действие:",
+        f"⚙️ *Настройки*\n\n📍 Склад: {USER_SETTINGS['warehouse']}\n📋 Процессы:\n  {processes}\n🔔 Уведомления: {'✅ Вкл' if USER_SETTINGS['monitoring_active'] else '❌ Выкл'}",
         parse_mode="Markdown",
         reply_markup=markup
     )
 
 @bot.message_handler(func=lambda message: message.text == "🔄 Обновить")
 async def refresh(message):
-    await bot.send_message(
-        message.chat.id,
-        "🔄 Обновляю данные...",
-        reply_markup=get_main_keyboard()
-    )
+    await bot.send_message(message.chat.id, "🔄 Обновляю...", reply_markup=get_main_keyboard())
     STATS['last_check'] = datetime.now().strftime("%H:%M:%S")
-    await bot.send_message(
-        message.chat.id,
-        "✅ Данные обновлены!",
-        reply_markup=get_main_keyboard()
-    )
+    await bot.send_message(message.chat.id, "✅ Готово!", reply_markup=get_main_keyboard())
 
-# ===== INLINE КНОПКИ =====
 @bot.callback_query_handler(func=lambda call: True)
 async def callback_handler(call):
     if call.data == "toggle_monitoring":
-        STATS['monitoring_active'] = not STATS['monitoring_active']
-        status = "включен" if STATS['monitoring_active'] else "выключен"
+        USER_SETTINGS['monitoring_active'] = not USER_SETTINGS['monitoring_active']
+        status = "включен" if USER_SETTINGS['monitoring_active'] else "выключен"
         await bot.answer_callback_query(call.id, f"Мониторинг {status} ✅")
-        await bot.edit_message_text(
-            f"⚙️ Мониторинг {status}",
-            call.message.chat.id,
-            call.message.message_id
-        )
-    elif call.data == "change_warehouse":
-        await bot.answer_callback_query(call.id, "Эта функция в разработке 🛠")
-
-# ===== АВТОРИЗАЦИЯ =====
-@bot.message_handler(commands=['auth'])
-async def auth(message):
-    global AUTH_CODE
-    code = message.text.replace("/auth", "").strip()
-    if code:
-        AUTH_CODE = code
-        await bot.send_message(message.chat.id, "✅ Код получен! Бот продолжит авторизацию.")
-    else:
-        await bot.send_message(message.chat.id, "❌ Отправь код так: /auth 123456")
-
-@bot.message_handler(func=lambda message: True)
-async def handle_code(message):
-    global AUTH_CODE
-    if message.text.isdigit() and len(message.text) >= 4:
-        AUTH_CODE = message.text
-        await bot.send_message(message.chat.id, "✅ Код получен! Бот продолжит авторизацию.")
+        await bot.edit_message_text(f"⚙️ Мониторинг {status}", call.message.chat.id, call.message.message_id)
+    elif call.data == "add_process":
+        markup = InlineKeyboardMarkup()
+        for proc in ALL_PROCESSES:
+            if proc not in USER_SETTINGS['processes']:
+                markup.add(InlineKeyboardButton(proc, callback_data=f"addproc_{proc}"))
+        if not markup.keyboard:
+            await bot.answer_callback_query(call.id, "Все процессы уже добавлены!")
+            return
+        await bot.edit_message_text("➕ Выбери процесс:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+    elif call.data.startswith("addproc_"):
+        process = call.data.replace("addproc_", "")
+        if process not in USER_SETTINGS['processes']:
+            USER_SETTINGS['processes'].append(process)
+        await bot.answer_callback_query(call.id, f"✅ {process} добавлен!")
+        await bot.edit_message_text(f"✅ Процесс '{process}' добавлен!", call.message.chat.id, call.message.message_id)
+        await settings(call.message)
+    elif call.data == "remove_process":
+        if not USER_SETTINGS['processes']:
+            await bot.answer_callback_query(call.id, "Нет процессов!")
+            return
+        markup = InlineKeyboardMarkup()
+        for proc in USER_SETTINGS['processes']:
+            markup.add(InlineKeyboardButton(f"❌ {proc}", callback_data=f"removeproc_{proc}"))
+        await bot.edit_message_text("➖ Выбери процесс для удаления:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+    elif call.data.startswith("removeproc_"):
+        process = call.data.replace("removeproc_", "")
+        if process in USER_SETTINGS['processes']:
+            USER_SETTINGS['processes'].remove(process)
+        await bot.answer_callback_query(call.id, f"❌ {process} удалён!")
+        await bot.edit_message_text(f"❌ Процесс '{process}' удалён!", call.message.chat.id, call.message.message_id)
+        await settings(call.message)
 
 async def main():
     print("🤖 Бот запущен!")
