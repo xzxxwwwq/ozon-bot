@@ -3,5 +3,5 @@ services:
     name: ozon-bot
     runtime: python
     plan: free
-    buildCommand: pip install -r requirements.txt && playwright install chromium
+    buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
