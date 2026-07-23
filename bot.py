@@ -79,7 +79,7 @@ def get_profile_text(message):
     now = datetime.now().strftime("%H:%M:%S")
     
     text = (
-        f"👤 *Профиль*\n\n"
+        f"👤 Профиль\n\n"
         f"• Имя: {user.first_name}\n"
         f"• ID: {user.id}\n"
         f"• Склад: {WAREHOUSE}\n"
