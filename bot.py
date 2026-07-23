@@ -16,11 +16,10 @@ bot = AsyncTeleBot(TOKEN)
 # ===== НАСТРОЙКИ =====
 USER_SETTINGS = {
     "warehouse": "Софьино",
-    "process": "Производство непрофиль",
+    "processes": ["Производство непрофиль"],
     "monitoring_active": True
 }
 
-# Полный список процессов (все, что ты показал)
 ALL_PROCESSES = [
     "Сортировка крупного товара",
     "Сортировка мелкого товара",
@@ -39,20 +38,20 @@ ALL_PROCESSES = [
 ]
 
 CHECK_INTERVAL = 60
-LAST_SHIFTS = set()
+LAST_SHIFTS = {}
 CHAT_ID = None
-
 STATS = {"total_shifts": 0, "last_check": None}
 
-# ===== ФУНКЦИЯ ПРОВЕРКИ СМЕН =====
-def check_shifts():
+# ===== ФУНКЦИЯ ПОЛУЧЕНИЯ ВСЕХ СМЕН =====
+def get_all_shifts():
+    """Получает все доступные смены на складе"""
     try:
         session = requests.Session()
         response = session.get("https://job.ozon.ru")
         soup = BeautifulSoup(response.text, 'html.parser')
         
         warehouse = USER_SETTINGS["warehouse"]
-        process = USER_SETTINGS["process"]
+        result = {}
         
         warehouses = soup.find_all('div', class_='warehouse-item')
         for wh in warehouses:
@@ -65,47 +64,68 @@ def check_shifts():
                     proc_data = proc_response.json()
                     
                     for proc in proc_data:
-                        if process in proc.get('name', ''):
-                            process_id = proc.get('id')
-                            if process_id:
-                                shifts_url = f"https://job.ozon.ru/api/process/{process_id}/shifts"
-                                shifts_response = session.get(shifts_url)
-                                shifts_data = shifts_response.json()
-                                
-                                available = []
-                                for shift in shifts_data:
-                                    if shift.get('available'):
-                                        date = shift.get('date')
-                                        if date:
-                                            available.append(date)
-                                return available
-        return []
+                        proc_name = proc.get('name', '')
+                        process_id = proc.get('id')
+                        if process_id:
+                            shifts_url = f"https://job.ozon.ru/api/process/{process_id}/shifts"
+                            shifts_response = session.get(shifts_url)
+                            shifts_data = shifts_response.json()
+                            
+                            available = []
+                            for shift in shifts_data:
+                                if shift.get('available'):
+                                    date = shift.get('date', '')
+                                    time_start = shift.get('time_start', '')
+                                    time_end = shift.get('time_end', '')
+                                    rate = shift.get('rate', '')
+                                    available.append({
+                                        'date': date,
+                                        'time_start': time_start,
+                                        'time_end': time_end,
+                                        'rate': rate
+                                    })
+                            if available:
+                                result[proc_name] = available
+                    break
+        return result
     except Exception as e:
-        print(f"Ошибка: {e}")
-        return []
+        print(f"Ошибка получения смен: {e}")
+        return {}
+
+def check_monitored_shifts():
+    """Проверяет смены только для отслеживаемых процессов"""
+    all_shifts = get_all_shifts()
+    monitored = {}
+    for process in USER_SETTINGS['processes']:
+        if process in all_shifts:
+            monitored[process] = all_shifts[process]
+    return monitored
 
 # ===== КЛАВИАТУРА =====
 def get_main_keyboard():
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
     btn1 = KeyboardButton("👤 Профиль")
     btn2 = KeyboardButton("📊 Статус")
-    btn3 = KeyboardButton("⭐ Рейтинг")
-    btn4 = KeyboardButton("⚙️ Настройки")
-    btn5 = KeyboardButton("🔄 Обновить")
+    btn3 = KeyboardButton("📋 Все смены")
+    btn4 = KeyboardButton("⭐ Рейтинг")
+    btn5 = KeyboardButton("⚙️ Настройки")
+    btn6 = KeyboardButton("🔄 Обновить")
     markup.row(btn1, btn2)
     markup.row(btn3, btn4)
-    markup.row(btn5)
+    markup.row(btn5, btn6)
     return markup
 
 def get_profile_text(message):
     user = message.from_user
     now = datetime.now().strftime("%H:%M:%S")
+    processes = "\n  ".join(USER_SETTINGS['processes']) if USER_SETTINGS['processes'] else "Нет"
     return (
         f"👤 Профиль\n\n"
         f"• Имя: {user.first_name}\n"
         f"• ID: {user.id}\n"
         f"• Склад: {USER_SETTINGS['warehouse']}\n"
-        f"• Процесс: {USER_SETTINGS['process']}\n"
+        f"• Процессы: {len(USER_SETTINGS['processes'])}\n"
+        f"  {processes}\n"
         f"• Мониторинг: {'✅ Активен' if USER_SETTINGS['monitoring_active'] else '❌ Отключен'}\n"
         f"• Найдено смен: {STATS['total_shifts']}\n"
         f"• Время: {now}"
@@ -136,22 +156,43 @@ def get_rating():
 
 # ===== МОНИТОРИНГ =====
 async def monitor_shifts():
-    global LAST_SHIFTS, CHAT_ID
+    global LAST_SHIFTS, CHAT_ID, STATS
     while True:
         try:
-            current_shifts = set(await asyncio.to_thread(check_shifts))
-            if current_shifts:
-                STATS['total_shifts'] += len(current_shifts)
-                new_shifts = current_shifts - LAST_SHIFTS
-                if new_shifts and CHAT_ID and USER_SETTINGS['monitoring_active']:
-                    await bot.send_message(
-                        CHAT_ID,
-                        f"🔔 НОВЫЕ СМЕНЫ!\n📍 {USER_SETTINGS['warehouse']}\n⚙️ {USER_SETTINGS['process']}\n📅 " + "\n".join([f"• {d}" for d in new_shifts])
-                    )
-                LAST_SHIFTS = current_shifts
+            all_shifts = await asyncio.to_thread(check_monitored_shifts)
+            
+            if all_shifts:
+                for process, shifts in all_shifts.items():
+                    current_dates = {s['date'] for s in shifts}
+                    old_dates = LAST_SHIFTS.get(process, set())
+                    new_dates = current_dates - old_dates
+                    
+                    if new_dates and CHAT_ID and USER_SETTINGS['monitoring_active']:
+                        STATS['total_shifts'] += len(new_dates)
+                        shift_text = ""
+                        for shift in shifts:
+                            if shift['date'] in new_dates:
+                                time_str = f"{shift['time_start']} - {shift['time_end']}" if shift['time_start'] else "Время уточняется"
+                                shift_text += f"  • 📅 {shift['date']} | ⏰ {time_str}\n"
+                        
+                        if shift_text:
+                            await bot.send_message(
+                                CHAT_ID,
+                                f"🔔 *НОВАЯ СМЕНА!*\n\n"
+                                f"📍 Склад: {USER_SETTINGS['warehouse']}\n"
+                                f"⚙️ Процесс: {process}\n"
+                                f"{shift_text}\n"
+                                f"🏃‍♂️ Бери скорее!",
+                                parse_mode="Markdown"
+                            )
+                    
+                    LAST_SHIFTS[process] = current_dates
+            
             STATS['last_check'] = datetime.now().strftime("%H:%M:%S")
+            
         except Exception as e:
             print(f"Ошибка мониторинга: {e}")
+        
         await asyncio.sleep(CHECK_INTERVAL)
 
 # ===== КОМАНДЫ =====
@@ -159,9 +200,14 @@ async def monitor_shifts():
 async def start(message):
     global CHAT_ID
     CHAT_ID = message.chat.id
+    processes = ", ".join(USER_SETTINGS['processes'])
     await bot.send_message(
         message.chat.id,
-        f"👋 Привет, {message.from_user.first_name}!\n📍 Слежу за сменами: {USER_SETTINGS['warehouse']} → {USER_SETTINGS['process']}",
+        f"👋 Привет, {message.from_user.first_name}!\n\n"
+        f"📍 Слежу за сменами:\n"
+        f"• Склад: {USER_SETTINGS['warehouse']}\n"
+        f"• Процессы: {processes}\n\n"
+        f"📌 Используй кнопки ниже",
         reply_markup=get_main_keyboard()
     )
     asyncio.create_task(monitor_shifts())
@@ -172,16 +218,43 @@ async def profile(message):
 
 @bot.message_handler(func=lambda message: message.text == "📊 Статус")
 async def status_command(message):
-    await bot.send_message(message.chat.id, "🔍 Проверяю наличие смен...", reply_markup=get_main_keyboard())
-    shifts = await asyncio.to_thread(check_shifts)
-    if shifts:
-        await bot.send_message(
-            message.chat.id,
-            f"✅ Доступные смены:\n" + "\n".join([f"• {d}" for d in shifts]),
-            reply_markup=get_main_keyboard()
-        )
+    await bot.send_message(message.chat.id, "🔍 Проверяю отслеживаемые смены...", reply_markup=get_main_keyboard())
+    all_shifts = await asyncio.to_thread(check_monitored_shifts)
+    
+    if all_shifts:
+        text = "✅ *Отслеживаемые смены:*\n\n"
+        for process, shifts in all_shifts.items():
+            text += f"⚙️ *{process}*\n"
+            for shift in shifts:
+                time_str = f"{shift['time_start']} - {shift['time_end']}" if shift['time_start'] else "Время уточняется"
+                text += f"  • 📅 {shift['date']} | ⏰ {time_str}\n"
+            text += "\n"
+        await bot.send_message(message.chat.id, text, parse_mode="Markdown", reply_markup=get_main_keyboard())
     else:
-        await bot.send_message(message.chat.id, "📭 Смен сейчас нет", reply_markup=get_main_keyboard())
+        await bot.send_message(message.chat.id, "📭 Нет смен по отслеживаемым процессам", reply_markup=get_main_keyboard())
+
+@bot.message_handler(func=lambda message: message.text == "📋 Все смены")
+async def all_shifts_command(message):
+    await bot.send_message(message.chat.id, "🔍 Загружаю все доступные смены...", reply_markup=get_main_keyboard())
+    all_shifts = await asyncio.to_thread(get_all_shifts)
+    
+    if all_shifts:
+        text = f"📋 *Все доступные смены*\n📍 {USER_SETTINGS['warehouse']}\n\n"
+        for process, shifts in all_shifts.items():
+            # Отмечаем, отслеживается ли процесс
+            is_monitored = process in USER_SETTINGS['processes']
+            mark = "✅ " if is_monitored else "   "
+            text += f"{mark}⚙️ *{process}*"
+            if is_monitored:
+                text += " (отслеживается)"
+            text += "\n"
+            for shift in shifts:
+                time_str = f"{shift['time_start']} - {shift['time_end']}" if shift['time_start'] else "Время уточняется"
+                text += f"  • 📅 {shift['date']} | ⏰ {time_str}\n"
+            text += "\n"
+        await bot.send_message(message.chat.id, text, parse_mode="Markdown", reply_markup=get_main_keyboard())
+    else:
+        await bot.send_message(message.chat.id, "📭 Нет доступных смен на складе", reply_markup=get_main_keyboard())
 
 @bot.message_handler(func=lambda message: message.text == "⭐ Рейтинг")
 async def rating_command(message):
@@ -203,14 +276,18 @@ async def rating_command(message):
 async def settings(message):
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("📍 Выбрать склад", callback_data="choose_warehouse"))
-    markup.add(InlineKeyboardButton("⚙️ Выбрать процесс", callback_data="choose_process"))
-    markup.add(InlineKeyboardButton(
-        "🔔 Вкл/Выкл уведомления", 
-        callback_data="toggle_monitoring"
-    ))
+    markup.add(InlineKeyboardButton("➕ Добавить процесс", callback_data="add_process"))
+    markup.add(InlineKeyboardButton("➖ Удалить процесс", callback_data="remove_process"))
+    markup.add(InlineKeyboardButton("🔔 Вкл/Выкл уведомления", callback_data="toggle_monitoring"))
+    
+    processes = "\n  ".join(USER_SETTINGS['processes']) if USER_SETTINGS['processes'] else "❌ Нет"
     await bot.send_message(
         message.chat.id,
-        f"⚙️ Настройки\n\n📍 Склад: {USER_SETTINGS['warehouse']}\n⚙️ Процесс: {USER_SETTINGS['process']}\n🔔 Уведомления: {'✅ Вкл' if USER_SETTINGS['monitoring_active'] else '❌ Выкл'}",
+        f"⚙️ *Настройки*\n\n"
+        f"📍 Склад: {USER_SETTINGS['warehouse']}\n"
+        f"📋 Процессы:\n  {processes}\n"
+        f"🔔 Уведомления: {'✅ Вкл' if USER_SETTINGS['monitoring_active'] else '❌ Выкл'}",
+        parse_mode="Markdown",
         reply_markup=markup
     )
 
@@ -234,7 +311,6 @@ async def callback_handler(call):
         )
     
     elif call.data == "choose_warehouse":
-        # Просто показываем доступные склады (их немного)
         markup = InlineKeyboardMarkup()
         warehouses = ["Софьино", "Томилино", "Подольск", "Коледино"]
         for wh in warehouses:
@@ -249,44 +325,69 @@ async def callback_handler(call):
     elif call.data.startswith("warehouse_"):
         warehouse_name = call.data.replace("warehouse_", "")
         USER_SETTINGS['warehouse'] = warehouse_name
-        
-        # Показываем все процессы для выбранного склада
-        markup = InlineKeyboardMarkup()
-        for proc in ALL_PROCESSES:
-            markup.add(InlineKeyboardButton(proc, callback_data=f"process_{proc}"))
-        
         await bot.edit_message_text(
-            f"✅ Склад: {warehouse_name}\n\nВыбери процесс:",
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=markup
-        )
-    
-    elif call.data.startswith("process_"):
-        process_name = call.data.replace("process_", "")
-        USER_SETTINGS['process'] = process_name
-        
-        await bot.edit_message_text(
-            f"✅ Настройки обновлены!\n\n📍 Склад: {USER_SETTINGS['warehouse']}\n⚙️ Процесс: {USER_SETTINGS['process']}",
+            f"✅ Склад изменён на: {warehouse_name}",
             call.message.chat.id,
             call.message.message_id
         )
         await bot.send_message(
             call.message.chat.id,
-            "✅ Готово! Я продолжаю следить за сменами.",
+            "✅ Готово!",
             reply_markup=get_main_keyboard()
         )
     
-    elif call.data == "choose_process":
+    elif call.data == "add_process":
         markup = InlineKeyboardMarkup()
         for proc in ALL_PROCESSES:
-            markup.add(InlineKeyboardButton(proc, callback_data=f"process_{proc}"))
+            if proc not in USER_SETTINGS['processes']:
+                markup.add(InlineKeyboardButton(proc, callback_data=f"addproc_{proc}"))
+        if not markup.keyboard:
+            await bot.answer_callback_query(call.id, "Все процессы уже добавлены!")
+            return
         await bot.edit_message_text(
-            f"📍 Текущий склад: {USER_SETTINGS['warehouse']}\n\nВыбери процесс:",
+            "➕ Выбери процесс для добавления:",
             call.message.chat.id,
             call.message.message_id,
             reply_markup=markup
         )
+    
+    elif call.data.startswith("addproc_"):
+        process = call.data.replace("addproc_", "")
+        if process not in USER_SETTINGS['processes']:
+            USER_SETTINGS['processes'].append(process)
+        await bot.answer_callback_query(call.id, f"✅ {process} добавлен!")
+        await bot.edit_message_text(
+            f"✅ Процесс '{process}' добавлен!",
+            call.message.chat.id,
+            call.message.message_id
+        )
+        await settings(call.message)
+    
+    elif call.data == "remove_process":
+        if not USER_SETTINGS['processes']:
+            await bot.answer_callback_query(call.id, "Нет процессов для удаления!")
+            return
+        markup = InlineKeyboardMarkup()
+        for proc in USER_SETTINGS['processes']:
+            markup.add(InlineKeyboardButton(f"❌ {proc}", callback_data=f"removeproc_{proc}"))
+        await bot.edit_message_text(
+            "➖ Выбери процесс для удаления:",
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=markup
+        )
+    
+    elif call.data.startswith("removeproc_"):
+        process = call.data.replace("removeproc_", "")
+        if process in USER_SETTINGS['processes']:
+            USER_SETTINGS['processes'].remove(process)
+        await bot.answer_callback_query(call.id, f"❌ {process} удалён!")
+        await bot.edit_message_text(
+            f"❌ Процесс '{process}' удалён!",
+            call.message.chat.id,
+            call.message.message_id
+        )
+        await settings(call.message)
 
 async def main():
     print("🤖 Бот запущен!")
