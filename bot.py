@@ -1,15 +1,14 @@
-bot.py
 import asyncio
 import os
 import re
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
 from playwright.async_api import async_playwright
+import telebot
+from telebot.async_telebot import AsyncTeleBot
 
 TOKEN = os.getenv("BOT_TOKEN")
 PHONE = os.getenv("PHONE")
-bot = Bot(token=TOKEN)
-dp = Dispatcher()
+
+bot = AsyncTeleBot(TOKEN)
 
 WAREHOUSE = "Софьино"
 PROCESS = "Производство непрофиль"
@@ -93,33 +92,33 @@ async def monitor_shifts():
             print(f"Ошибка мониторинга: {e}")
         await asyncio.sleep(CHECK_INTERVAL)
 
-@dp.message(Command("start"))
-async def start(message: types.Message):
+@bot.message_handler(commands=['start'])
+async def start(message):
     global CHAT_ID
     CHAT_ID = message.chat.id
-    await message.answer("👋 Бот запущен! Буду присылать уведомления о сменах.")
+    await bot.send_message(message.chat.id, "👋 Бот запущен! Буду присылать уведомления о сменах.")
     asyncio.create_task(monitor_shifts())
 
-@dp.message(Command("auth"))
-async def auth(message: types.Message):
+@bot.message_handler(commands=['auth'])
+async def auth(message):
     global AUTH_CODE
     code = message.text.replace("/auth", "").strip()
     if code:
         AUTH_CODE = code
-        await message.answer("✅ Код получен! Бот продолжит авторизацию.")
+        await bot.send_message(message.chat.id, "✅ Код получен! Бот продолжит авторизацию.")
     else:
-        await message.answer("❌ Отправь код так: /auth 123456")
+        await bot.send_message(message.chat.id, "❌ Отправь код так: /auth 123456")
 
-@dp.message()
-async def handle_code(message: types.Message):
+@bot.message_handler(func=lambda message: True)
+async def handle_code(message):
     global AUTH_CODE
     if message.text.isdigit() and len(message.text) >= 4:
         AUTH_CODE = message.text
-        await message.answer("✅ Код получен! Бот продолжит авторизацию.")
+        await bot.send_message(message.chat.id, "✅ Код получен! Бот продолжит авторизацию.")
 
 async def main():
     print("🤖 Бот запущен!")
-    await dp.start_polling(bot)
+    await bot.polling()
 
 if __name__ == "__main__":
     asyncio.run(main())
